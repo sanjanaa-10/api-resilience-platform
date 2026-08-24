@@ -167,6 +167,30 @@ describe('metrics collector', () => {
     assert.equal(payment?.averageLatencyMs, 75.5);
     assert.equal(payment?.p95LatencyMs, 98);
   });
+
+  it('totals average latency becomes numeric after completed requests with durationMs', () => {
+    const metrics = new MetricsCollector(200);
+    for (const ms of [100, 200, 300]) {
+      metrics.observe(
+        makeEvent({ eventType: 'REQUEST_COMPLETED', service: 'payment', metadata: { durationMs: ms } }),
+      );
+    }
+    const snapshot = metrics.getSnapshot();
+    assert.ok(typeof snapshot.totals.averageLatencyMs === 'number', 'totals.averageLatencyMs should be numeric');
+    assert.ok(snapshot.totals.averageLatencyMs > 0);
+  });
+
+  it('totals p95 latency becomes numeric after completed requests with durationMs', () => {
+    const metrics = new MetricsCollector(200);
+    for (const ms of [100, 200, 300]) {
+      metrics.observe(
+        makeEvent({ eventType: 'REQUEST_COMPLETED', service: 'payment', metadata: { durationMs: ms } }),
+      );
+    }
+    const snapshot = metrics.getSnapshot();
+    assert.ok(typeof snapshot.totals.p95LatencyMs === 'number', 'totals.p95LatencyMs should be numeric');
+    assert.ok(snapshot.totals.p95LatencyMs > 0);
+  });
 });
 
 // ─── 4. Incident aggregator ──────────────────────────────────────────────────

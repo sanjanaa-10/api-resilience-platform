@@ -83,11 +83,15 @@ export class MetricsCollector {
         state.successCount += 1;
         this.totals.successCount += 1;
         this.recordLatency(state, event);
+        this.recordTotalsLatency(event);
+        this.refreshLatencies(this.totals);
         break;
       case 'REQUEST_FAILED':
         state.failureCount += 1;
         this.totals.failureCount += 1;
         this.recordLatency(state, event);
+        this.recordTotalsLatency(event);
+        this.refreshLatencies(this.totals);
         break;
       case 'UPSTREAM_TIMEOUT':
         state.timeoutCount += 1;
@@ -147,6 +151,15 @@ export class MetricsCollector {
     const sum = state.latencies.reduce((acc, value) => acc + value, 0);
     state.averageLatencyMs = Math.round((sum / state.latencies.length) * 100) / 100;
     state.p95LatencyMs = percentile95(state.latencies);
+  }
+
+  private recordTotalsLatency(event: ResilienceEvent): void {
+    const duration = event.metadata['durationMs'];
+    if (typeof duration !== 'number' || !Number.isFinite(duration)) return;
+    this.totals.latencies.push(duration);
+    if (this.totals.latencies.length > this.latencyWindow) {
+      this.totals.latencies.splice(0, this.totals.latencies.length - this.latencyWindow);
+    }
   }
 
   private toPublic(state: MetricsState): ServiceMetrics {
