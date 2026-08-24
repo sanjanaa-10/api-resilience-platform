@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": ".",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+
+    "sourceMap": false,
+    "declaration": false,
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": [
+    "shared/**/*.ts",
+    "payment-service/**/*.ts",
+    "ai-service/**/*.ts",
+    "notification-service/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

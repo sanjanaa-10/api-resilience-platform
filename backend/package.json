@@ -1,0 +1,33 @@
+{
+  "name": "api-resilience-platform-backend",
+  "version": "0.1.0",
+  "description": "Backend foundation for the API Resilience & Failover Platform: gateway, health monitoring, retries, rate limiting, circuit breaker, failover, observability and ML anomaly detection.",
+  "main": "dist/server.js",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --import tsx --watch src/server.ts",
+    "build": "node node_modules/typescript/lib/tsc.js",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test scripts/circuitBreaker.test.ts scripts/rateLimiter.test.ts scripts/failover.test.ts",
+    "lint": "node node_modules/eslint/bin/eslint.js \"src/**/*.ts\"",
+    "format": "node node_modules/prettier/bin/prettier.cjs --write \"src/**/*.ts\"",
+    "format:check": "node node_modules/prettier/bin/prettier.cjs --check \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.1",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.67.0"
+  }
+}

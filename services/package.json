@@ -1,0 +1,37 @@
+{
+  "name": "api-resilience-simulated-services",
+  "version": "0.1.0",
+  "description": "Simulated unreliable upstream services (payment, AI, notification) used to test the API Resilience & Failover Platform gateway.",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node scripts/run-all.js",
+    "dev:payment": "node --import tsx --watch payment-service/src/server.ts",
+    "dev:ai": "node --import tsx --watch ai-service/src/server.ts",
+    "dev:ai-fallback": "node --import tsx --watch ai-fallback-service/src/server.ts",
+    "dev:notification": "node --import tsx --watch notification-service/src/server.ts",
+    "build": "node node_modules/typescript/lib/tsc.js",
+    "start:payment": "node dist/payment-service/src/server.js",
+    "start:ai": "node dist/ai-service/src/server.js",
+    "start:ai-fallback": "node dist/ai-fallback-service/src/server.js",
+    "start:notification": "node dist/notification-service/src/server.js",
+    "lint": "node node_modules/eslint/bin/eslint.js \"shared/src/**/*.ts\" \"*/src/**/*.ts\"",
+    "format": "node node_modules/prettier/bin/prettier.cjs --write \"shared/src/**/*.ts\" \"*/src/**/*.ts\"",
+    "format:check": "node node_modules/prettier/bin/prettier.cjs --check \"shared/src/**/*.ts\" \"*/src/**/*.ts\""
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.1",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.67.0"
+  }
+}
