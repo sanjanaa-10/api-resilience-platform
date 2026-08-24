@@ -4,7 +4,7 @@ Production-style platform that protects applications from unhealthy APIs:
 API gateway, health monitoring, retry logic, rate limiting, circuit breaker,
 automatic failover, observability and ML anomaly detection.
 
-**Status: Phase 7 — automatic failover across provider groups.**
+**Status: Phase 9 — explainable ML anomaly detection: rolling median/MAD baselines over real metrics, scored 0–1 with human-readable reasons.**
 
 | Capability | Status |
 | --- | --- |
@@ -19,7 +19,9 @@ automatic failover, observability and ML anomaly detection.
 | Rate limiting | Done |
 | Circuit breaker (per service, CLOSED/OPEN/HALF_OPEN) | Done |
 | Automatic failover (provider groups, budget=1) | Done |
-| ML anomaly detection / dashboard | Planned |
+| Resilience event stream + metrics + incident timelines | Done |
+| Explainable anomaly detection (median/MAD robust baselines) | Done |
+| Anomaly dashboard UI | Planned (Phase 10) |
 
 Companion project: [`../services`](../services/README.md) — four simulated
 unreliable upstreams this gateway is tested against (payment, ai-primary,
@@ -666,6 +668,236 @@ CIRCUIT_OPEN`).
 - The health gate reads the monitor's snapshot (up to one probe interval
   stale); the first boot round runs immediately, bounding the unknown window.
 
+## Observability & incidents
+
+Step 8 turns everything the gateway already does into a **queryable, typed
+event stream**, then derives metrics and incidents from it deterministically.
+
+### Event model (`src/observability/events.ts`)
+
+One closed vocabulary — every layer emits ONLY these types:
+
+| EventType | Default severity | Emitted by |
+| --- | --- | --- |
+| `REQUEST_STARTED` / `REQUEST_COMPLETED` / `REQUEST_FAILED` | INFO / INFO / WARNING | group proxy handler (one lifecycle per logical request) |
+| `RETRY_ATTEMPT` | WARNING | per-attempt proxy hook (fires the moment an attempt fails) |
+| `UPSTREAM_TIMEOUT` | WARNING | same hook when an attempt times out |
+| `RATE_LIMITED` | WARNING | token-bucket rejection hook (`service: "gateway"`) |
+| `CIRCUIT_OPENED` / `CIRCUIT_HALF_OPEN` / `CIRCUIT_CLOSED` | CRITICAL / INFO / INFO | breaker transition hook |
+| `FAILOVER_STARTED` / `FAILOVER_COMPLETED` | WARNING / CRITICAL | failover orchestrator emit hook |
+| `HEALTH_CHANGED` | INFO (WARNING when → unhealthy) | monitor state-change hook |
+
+Every event carries: `eventId`, ISO `timestamp`, `eventType`, `service`,
+`severity`, `requestId`, human `message`, structured `metadata`.
+
+### Architecture: one facade, three sinks, zero risk to traffic
+
+```
+ record(event) ──► ResilienceEventStore   (bounded ring, newest kept)
+              ├─► MetricsCollector       (counters + latency window)
+              └─► IncidentAggregator     (deterministic rules)
+```
+
+`ObservabilityService.record()` NEVER throws and NEVER lets a broken sink
+break a request — each sink is isolated in its own try/catch, so a corrupted
+store degrades only itself while metrics and incidents keep working. All
+producers integrate through **optional constructor/factory hooks** added in
+Step 8 (healthMonitor `onStateChange`, rate limiter `onRejected`, circuit
+breaker `onTransition`, failover `emit`, proxy `onAttemptRecord`); every hook
+site additionally swallows observer failures ("belt and suspenders").
+
+### Metrics
+
+- Totals + per-service: `requestCount`, `successCount`, `failureCount`,
+  `timeoutCount`, `retryCount`, `failoverCount`.
+- Latency statistics from terminal events' `durationMs`: rolling bounded
+  window (default 200 samples, oldest evicted) → `averageLatencyMs`,
+  `p95LatencyMs`. p95 = sorted copy, index `ceil(0.95·n)−1` — no
+  interpolation, deterministic.
+- Terminal lifecycle events are owned by the SERVING provider, so a failed
+  over request counts traffic for both providers truthfully.
+
+### Incident rules (no heuristics)
+
+| Rule | Trigger |
+| --- | --- |
+| START | `CIRCUIT_OPENED` immediately, OR `INCIDENT_FAILURE_THRESHOLD` failure signals within `INCIDENT_LOOKBACK_MS` |
+| BACKFILL | pre-incident buildup events are replayed into the timeline so the story starts at the FIRST signal |
+| ATTACH | further failure/context events join the ACTIVE incident — never duplicated |
+| ESCALATE | circuit opening or failover raises severity to CRITICAL and sets the flag |
+| RESOLVE | explicit `CIRCUIT_CLOSED` wins; otherwise lazily once no failure signal for `INCIDENT_RECOVERY_QUIET_MS` |
+
+Each incident exposes `incidentId, service, startedAt, endedAt, status,
+severity, title, summary, eventCount, failoverOccurred, circuitOpened,
+affectedRequests` (distinct failing requests) and a chronological `timeline`
+(`{timestamp, eventType, severity, requestId, message}`), capped at 1000
+entries. Up to `INCIDENT_MAX_RESOLVED` resolved incidents are retained.
+
+### Read-only API
+
+```bash
+curl http://localhost:4000/api/metrics
+# {"generatedAt":"…","totals":{"requestCount":9,"successCount":8,…,
+#  "circuitOpenCount":1},"services":{"ai-fallback":{…},"ai-primary":{…}}}
+
+curl "http://localhost:4000/api/events?type=CIRCUIT_OPENED&limit=10"
+# newest-first filtered events; also ?service=&severity=
+
+curl http://localhost:4000/api/incidents/active      # BEFORE /incidents/:id
+curl http://localhost:4000/api/incidents             # active + resolved
+curl http://localhost:4000/api/incidents/<id>        # full timeline, 404 if unknown
+```
+
+Invalid `type`/`severity`/`limit` values produce a standardized 400 envelope;
+unknown incident ids a 404.
+
+Example timeline excerpt (primary down → failover storm trips the breaker):
+
+```json
+{"incidentId":"…","service":"ai-primary","status":"RESOLVED","severity":"CRITICAL",
+ "summary":"17 failure signals, 10 retries, circuit OPENED, traffic failed over.",
+ "failoverOccurred":true,"circuitOpened":true,"affectedRequests":8,
+ "timeline":[{"timestamp":"…","eventType":"UPSTREAM_TIMEOUT", …},
+             {"timestamp":"…","eventType":"FAILOVER_STARTED", …},
+             {"timestamp":"…","eventType":"CIRCUIT_OPENED", …},
+             {"timestamp":"…","eventType":"CIRCUIT_HALF_OPEN", …},
+             {"timestamp":"…","eventType":"CIRCUIT_CLOSED", …}]}
+```
+
+### Limitations & production evolution
+
+- Everything is in-memory per gateway instance: restarts reset events,
+  metrics and incidents (bounded by design — no unbounded growth).
+- Single-node truth: a multi-gateway deployment would fan events out through
+  Kafka/an event bus and aggregate centrally before computing incidents.
+- Natural next steps: Prometheus exposition/scrape for metrics, PostgreSQL
+  persistence for incidents, OpenTelemetry traces joining `requestId`.
+
+## Explainable anomaly detection
+
+Phase 9 adds a **statistical** detector over the Phase 8 metric stream — NOT a
+trained supervised model. Every verdict is traceable to numbers: a score,
+a status, and a ranked list of reasons naming the exact metric, its baseline,
+its current value, the percent change and the robust z-score.
+
+### Data flow (strictly one direction)
+
+```
+metricsCollector (counters + latency window)
+        │  MetricSampler: ONE shared timer (unref'd, stoppable)
+        │  per tick: counter deltas vs previous tick -> FeatureSnapshot
+        │  first tick per service only SEEDS; zero-volume ticks emit nothing
+        ▼
+AnomalyDetector.observe(snapshot)      (synchronous, deterministic)
+        │  per SERVICE+METRIC bounded ring of recent values
+        │  median + MAD baseline -> one-sided robust z-scores
+        ▼
+status/score/reasons  ──►  /api/anomalies*            (read-only HTTP)
+        └── transitions ──►  ANOMALY_DETECTED / ANOMALY_RESOLVED events
+                             (incident aggregator treats them as CONTEXT only)
+```
+
+### Why median + MAD instead of mean/stddev
+
+A single spike drags the mean off center and inflates the stddev — masking
+the very thing being detected. The median ignores up to half outliers and the
+MAD is equally insensitive. `1.4826 * MAD` approximates the standard deviation
+of clean data, so z-scores keep their familiar "how many sigmas?" meaning.
+Constant-history case (`MAD === 0`, e.g. flat 1% error rate): the denominator
+falls back to `max(5% of the median, floor)` with floors of `0.02` for rates
+and `25ms` for latencies, so any real change still scores.
+
+### Scoring, statuses, thresholds
+
+- Per metric: `z = (value - median) / (1.4826*MAD or fallback)`, ONE-SIDED
+  upper test — values at/below the median are healthy by definition (z = 0);
+  lower latency and fewer errors are never anomalies.
+- Metric contribution: `clamp(z / 8, 0, 1)`; service score = max contribution
+  rounded to 2 decimals, so the score is "how many robust sigmas did the
+  worst metric reach" on a 0–1 scale.
+- Statuses: `score >= 0.8` → `ANOMALOUS`, `>= 0.5` → `WARNING`, else
+  `NORMAL`. Until `minSamples` observations exist the status is
+  `INSUFFICIENT_DATA` and the score is explicitly `null` — never fabricated.
+- Reasons: every metric with `z >= 3`, sorted by z descending:
+  `{metric, current, baseline, changePercent, zScore}`.
+- `requestVolume` is captured but deliberately NOT scored: traffic growth is
+  a capacity question, not a health degradation.
+
+### Transitions and determinism
+
+Events fire only on TRANSITIONS (never repeatedly): worsening to
+WARNING/ANOMALOUS emits `ANOMALY_DETECTED` once (severity WARNING/CRITICAL),
+returning to NORMAL emits `ANOMALY_RESOLVED` once (INFO). Improvements short
+of NORMAL stay silent. The detector never reads the wall clock — time comes
+from each snapshot's timestamp — making unit tests exact without fake timers.
+Baselines are strictly per service+metric (never merged), windows are bounded
+(`windowSize`), assessment history is bounded (`maxHistory` = 50).
+
+### Read-only API
+
+```bash
+curl http://localhost:4000/api/anomalies            # all tracked services
+curl http://localhost:4000/api/anomalies/payment    # full report (below)
+curl http://localhost:4000/api/anomalies/payment/history  # bounded history
+# unknown service -> 404 envelope
+```
+
+Example report during injected payment latency degradation:
+
+```json
+{
+  "service": "payment",
+  "timestamp": "2026-08-24T12:58:41.000Z",
+  "status": "ANOMALOUS",
+  "score": 1,
+  "sampleCount": 9,
+  "windowSize": 16,
+  "featureSnapshot": {
+    "service": "payment", "requestVolume": 6,
+    "avgLatencyMs": 706.16, "p95LatencyMs": 2516.4,
+    "errorRate": 0, "timeoutRate": 0, "retryRate": 0, "failoverRate": 0
+  },
+  "baseline": {
+    "avgLatencyMs":  { "median": 135.6, "mad": 12.3, "sampleCount": 9 },
+    "p95LatencyMs":  { "median": 158,   "mad": 11.5, "sampleCount": 9 },
+    "errorRate":     { "median": 0,     "mad": 0,    "sampleCount": 9 },
+    "timeoutRate":   { "median": 0,     "mad": 0,    "sampleCount": 9 },
+    "retryRate":     { "median": 0,     "mad": 0,    "sampleCount": 9 },
+    "failoverRate":  { "median": 0,     "mad": 0,    "sampleCount": 9 }
+  },
+  "reasons": [
+    { "metric": "p95LatencyMs",  "current": 2516.4, "baseline": 158,
+      "changePercent": 1492, "zScore": 94.32 },
+    { "metric": "avgLatencyMs", "current": 706.16, "baseline": 135.6,
+      "changePercent": 421,  "zScore": 46.05 }
+  ]
+}
+```
+
+The corresponding stored event:
+
+```json
+{
+  "eventType": "ANOMALY_DETECTED", "service": "payment", "severity": "CRITICAL",
+  "message": "Anomaly detected on payment (score 1, status ANOMALOUS)",
+  "metadata": {
+    "status": "ANOMALOUS", "previousStatus": "NORMAL", "score": 1,
+    "reasons": [ { "metric": "p95LatencyMs", "zScore": 94.32, "...": "..." } ]
+  }
+}
+```
+
+### Limitations & honest scope
+
+- Statistical control-chart logic, not machine learning: it detects DEVIATION
+  FROM RECENT BEHAVIOR, not root causes, and cannot see issues that don't move
+  these six metrics (e.g. wrong-but-fast responses).
+- Cold start: the first `minSamples` intervals are honestly reported as
+  insufficient rather than scored against an empty baseline.
+- Slow drift can ratchet the baseline (each new normal becomes the reference)
+  — mitigable in production with seasonal baselines or dual-window comparison.
+- Single-node in-memory state; a cluster would need shared feature storage.
+
 ## Health monitoring
 
 - Probes each `baseUrl + healthPath` every `HEALTH_CHECK_INTERVAL_MS`
@@ -695,6 +927,17 @@ CIRCUIT_OPEN`).
 | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | 5 | Consecutive failed logical requests → OPEN |
 | `CIRCUIT_BREAKER_OPEN_DURATION_MS` | 10000 | Cool-off before HALF_OPEN probes |
 | `CIRCUIT_BREAKER_HALF_OPEN_MAX_REQUESTS` | 1 | Concurrent recovery probes |
+| `EVENTS_CAPACITY` | 2000 | Max resilience events retained in memory |
+| `METRICS_LATENCY_WINDOW` | 200 | Latency samples per service for avg/p95 |
+| `INCIDENT_FAILURE_THRESHOLD` | 3 | Failure signals within lookback that open an incident |
+| `INCIDENT_LOOKBACK_MS` | 60000 | Rolling window for the failure threshold |
+| `INCIDENT_RECOVERY_QUIET_MS` | 10000 | Failure-free period before quiet-period resolution |
+| `INCIDENT_MAX_RESOLVED` | 100 | Resolved incidents kept in memory |
+| `ANOMALY_SAMPLE_INTERVAL_MS` | 5000 | Metric sampling cadence for feature snapshots |
+| `ANOMALY_WINDOW_SIZE` | 30 | Baseline window (samples per service+metric) |
+| `ANOMALY_MIN_SAMPLES` | 10 | Samples required before scoring (else INSUFFICIENT_DATA) |
+| `ANOMALY_SCORE_WARNING` | 0.5 | Score threshold for WARNING |
+| `ANOMALY_SCORE_ANOMALOUS` | 0.8 | Score threshold for ANOMALOUS |
 | `PAYMENT_SERVICE_URL` | http://localhost:4101 | Override registry default |
 | `AI_SERVICE_URL` | http://localhost:4102 | Override ai-primary registry default |
 | `AI_FALLBACK_SERVICE_URL` | http://localhost:4104 | Override ai-fallback registry default |
@@ -708,6 +951,14 @@ CIRCUIT_OPEN`).
 | GET | `/` | Service metadata + endpoint map |
 | GET | `/api/services` | Health + circuit snapshot of all registered providers |
 | POST | `/api/services/check` | Force an immediate probing round |
+| GET | `/api/metrics` | Counters + avg/p95 latency (totals + per service) |
+| GET | `/api/events` | Resilience events, newest-first (`?service=&type=&severity=&limit=`) |
+| GET | `/api/incidents/active` | Currently ACTIVE incidents |
+| GET | `/api/incidents` | All incidents (active first), newest started |
+| GET | `/api/incidents/:id` | One incident incl. full timeline (404 if unknown) |
+| GET | `/api/anomalies` | Anomaly reports for all tracked services |
+| GET | `/api/anomalies/:service` | One report: status, score, baseline, reasons (404 if untracked) |
+| GET | `/api/anomalies/:service/history` | Bounded post-cold-start assessment history |
 | GET | `/api/payment/test` | Proxy → payment (singleton group) |
 | GET | `/api/ai/test` | Proxy → ai group: ai-primary, failover → ai-fallback |
 | GET | `/api/notification/test` | Proxy → notification (singleton group) |
@@ -917,18 +1168,32 @@ backend/src/
 │   └── services.config.ts      # THE registry — registrations + PROVIDER_GROUPS (topology truth)
 ├── services/
 │   ├── serviceRegistry.ts      # typed runtime access over registrations
-│   ├── healthMonitor.service.ts# probe loop + snapshots + transition logging + isHealthy()
+│   ├── healthMonitor.service.ts# probe loop + snapshots + onStateChange hook + isHealthy()
 │   ├── upstreamClient.service.ts # fetch wrapper: timeout + outcome classification
 │   ├── retryPolicy.service.ts  # policy data: defaults, retryable statuses, idempotency guard
 │   ├── retry.service.ts        # generic executor: backoff+jitter, budget guard, hooks
-│   ├── rateLimiter.service.ts  # token bucket: refill-from-elapsed-time + headers
-│   ├── circuitBreaker.service.ts # per-provider state machine: CLOSED/OPEN/HALF_OPEN
-│   ├── failover.service.ts     # provider-group orchestrator: gates, budget=1, metadata
-│   └── proxy.service.ts        # one reusable proxy mechanism (wraps retry executor)
+│   ├── rateLimiter.service.ts  # token bucket: refill-from-elapsed-time + onRejected hook
+│   ├── circuitBreaker.service.ts # per-provider state machine + onTransition hook
+│   ├── failover.service.ts     # provider-group orchestrator: gates, budget=1, emit hook
+│   └── proxy.service.ts        # one reusable proxy mechanism (+ per-attempt hook)
+├── observability/
+│   ├── events.ts               # closed EventType vocabulary + severities + factory
+│   ├── eventStore.service.ts   # bounded newest-retained ring + filtered reads
+│   ├── metricsCollector.service.ts # counters + bounded latency window (avg/p95)
+│   ├── incidentAggregator.service.ts # deterministic START/ATTACH/ESCALATE/RESOLVE rules
+│   └── observability.service.ts # facade: record() fans out, never throws
+├── anomaly/
+│   ├── anomalyTypes.ts          # statuses, MetricKey, thresholds, report shapes
+│   ├── anomalyFeatures.ts       # FeatureSnapshot: pure counter-delta math
+│   ├── anomalyBaseline.ts       # median/MAD ring + one-sided robust z-score
+│   ├── anomalyDetector.service.ts # scoring, reasons, transitions, history
+│   └── metricSampler.service.ts # ONE shared timer -> snapshots (unref, stoppable)
 ├── controllers/
 │   └── gateway.controller.ts   # list/refresh services + per-GROUP proxy handler factory
 ├── routes/
 │   │   service.routes.ts       # /api/services (+ /check) — merged health+circuit view
+│   │   observability.routes.ts # /api/metrics /events /incidents* — read-only surface
+│   │   anomaly.routes.ts       # /api/anomalies* — read-only detector surface
 │   └── proxy.routes.ts         # generated from PROVIDER_GROUPS
 ├── scripts/                    # node:test unit tests + live E2E harnesses (not in build)
 └── types/index.ts              # ServiceRegistration, ProviderGroup, FailoverMetadata, ...
@@ -943,26 +1208,47 @@ backend/src/
 2. ~~**Phase 5** — circuit breaker per service (CLOSED/OPEN/HALF_OPEN).~~ DONE
 3. ~~**Phase 6** — rate limiting per client/service.~~ DONE
 4. ~~**Phase 7** — automatic failover across provider pools.~~ DONE
-5. **Phase 8** — metrics pipeline, incident timeline persistence.
-6. **Phase 9** — ML anomaly detection on latency/error streams.
-7. **Phase 10** — React dashboard: light/dark theme, live topology, chaos panel.
+5. ~~**Phase 8** — metrics pipeline, incident timeline (in-memory).~~ DONE
+6. ~~**Phase 9** — explainable anomaly detection on latency/error streams.~~ DONE
+7. **Phase 10** — React dashboard: light/dark theme, live topology, chaos panel,
+   anomaly cards.
 
 ## Testing
 
 ```bash
-npm test                              # unit: node:test runner, zero new deps (34 tests)
+npm test                              # unit: node:test runner, zero new deps (81 tests)
 npm run build                         # tsc production build
 node scripts/e2e-circuit-breaker.cjs # live E2E: breaker state machine on payment (~40s)
 node scripts/e2e-failover.cjs        # live E2E: failover scenarios on the ai group (~30s)
+node scripts/e2e-observability.cjs   # live E2E: events→metrics→incident→resolution (~45s)
+node scripts/e2e-anomaly.cjs         # live E2E: baseline→degradation→detection→recovery (~60s)
 ```
 
 Unit tests cover the breaker state machine with an injected fake clock
 (threshold tripping, fail-fast cost, lazy OPEN→HALF_OPEN, single-probe guard,
-both recovery paths, isolation), the token bucket scenarios from Step 5, and
-the failover orchestrator with a scripted executor seam (classification table,
+both recovery paths, isolation), the token bucket scenarios from Step 5, the
+failover orchestrator with a scripted executor seam (classification table,
 budget exhaustion across a three-provider group, circuit-open skip without
-contact, health gating, non-eligible stop, per-provider outcome isolation).
+contact, health gating, non-eligible stop, per-provider outcome isolation),
+the full observability stack (event defaults, bounded store
+ordering/capacity/filtering, counter math, avg/p95 + window eviction,
+threshold/circuit/failover incident rules, timeline backfill and ordering,
+both resolution paths, affected-request accounting, broken-sink isolation),
+and the anomaly detector (median/MAD math incl. constant-history fallback,
+cold-start honesty, per-metric spike detection for all six metrics,
+multi-metric ranking, score bounds, dominant-first explanations, per-service
+baseline isolation, exactly-once transition events, bounded history,
+throwing-observer resilience, sampler delta/seed/idle logic).
 
 The E2E harnesses spawn all simulators + gateway, drive real traffic, and
-assert statuses, timing, `/api/services` circuit fields and simulator request
-counters; they refuse to start if any expected port is still occupied.
+assert statuses, timing, `/api/services` circuit fields, simulator request
+counters — for Step 8 the live `/api/metrics`, `/api/events` and
+`/api/incidents*` surfaces (normal traffic metrics, retry events, a real
+circuit trip producing an ACTIVE CRITICAL incident with chronological
+timeline, and recovery flipping it to RESOLVED) — and for Step 9 the live
+`/api/anomalies*` surface (cold start with null score, baselines filling to
+NORMAL, injected 2500ms payment latency driving WARNING→ANOMALOUS with ranked
+explanations while every request still returns 200, `ANOMALY_DETECTED` /
+`ANOMALY_RESOLVED` events in the store, ai-primary isolation, recovery after
+reset, and 404s for unknown services); they refuse to start if any
+expected port is still occupied.

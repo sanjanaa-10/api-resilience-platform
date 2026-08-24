@@ -35,6 +35,18 @@ export interface AdmissionDecision {
   isProbe: boolean;
 }
 
+/** Payload delivered on every state transition (observability hook). */
+export interface CircuitTransition {
+  service: ServiceName;
+  from: CircuitStateName;
+  to: CircuitStateName;
+  reason: string;
+  failureCount: number;
+  requestId?: string;
+}
+
+export type CircuitTransitionListener = (transition: CircuitTransition) => void;
+
 function createRuntime(): CircuitRuntime {
   return { state: 'CLOSED', failureCount: 0, openedAtMs: null, activeProbes: 0 };
 }
@@ -57,6 +69,8 @@ export class CircuitBreaker {
     private readonly options: CircuitBreakerOptions,
     /** Injectable clock for deterministic tests (defaults to wall clock). */
     private readonly now: () => number = Date.now,
+    /** Optional observability hook, fired after every committed transition. */
+    private readonly onTransition?: CircuitTransitionListener,
   ) {}
 
   // ─── Admission ──────────────────────────────────────────────────────────────
@@ -186,6 +200,22 @@ export class CircuitBreaker {
       ...(requestId !== undefined ? { requestId } : {}),
       timestamp: new Date().toISOString(),
     });
+
+    if (this.onTransition !== undefined) {
+      try {
+        this.onTransition({
+          service,
+          from: previousState,
+          to: newState,
+          reason,
+          failureCount: circuit.failureCount,
+          ...(requestId !== undefined ? { requestId } : {}),
+        });
+      } catch (error) {
+        // Belt and suspenders: a broken observer can never affect admission.
+        logger.warn('circuit_observer_error', { errorMessage: (error as Error).message });
+      }
+    }
   }
 }
 
@@ -213,10 +243,16 @@ export function countsAsCircuitFailure(outcome: { kind: string; status?: number 
  *   CIRCUIT_BREAKER_OPEN_DURATION_MS       default 10000 cool-off before probing
  *   CIRCUIT_BREAKER_HALF_OPEN_MAX_REQUESTS default 1     concurrent recovery probes
  */
-export function createCircuitBreakerFromEnv(): CircuitBreaker {
-  return new CircuitBreaker({
-    failureThreshold: env.circuitFailureThreshold,
-    openDurationMs: env.circuitOpenDurationMs,
-    halfOpenMaxRequests: env.circuitHalfOpenMaxRequests,
-  });
+export function createCircuitBreakerFromEnv(
+  onTransition?: CircuitTransitionListener,
+): CircuitBreaker {
+  return new CircuitBreaker(
+    {
+      failureThreshold: env.circuitFailureThreshold,
+      openDurationMs: env.circuitOpenDurationMs,
+      halfOpenMaxRequests: env.circuitHalfOpenMaxRequests,
+    },
+    Date.now,
+    onTransition,
+  );
 }

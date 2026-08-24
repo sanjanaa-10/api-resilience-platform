@@ -7,6 +7,12 @@ import { requestLogger } from './middleware/requestLogger.middleware';
 import { createApiRouter } from './routes/index.routes';
 import { createTokenBucketRateLimiter } from './services/rateLimiter.service';
 import { createCircuitBreakerFromEnv } from './services/circuitBreaker.service';
+import { createObservabilityServiceFromEnv } from './observability/observability.service';
+import type { ObservabilityService } from './observability/observability.service';
+import {
+  createAnomalyDetectorFromEnv,
+} from './anomaly/anomalyDetector.service';
+import type { AnomalyDetector } from './anomaly/anomalyDetector.service';
 import type { HealthMonitor } from './services/healthMonitor.service';
 
 export interface AppDependencies {
@@ -16,11 +22,19 @@ export interface AppDependencies {
   rateLimiter?: ReturnType<typeof createTokenBucketRateLimiter>;
   /** Optional breaker; if not provided one will be created from env config. */
   circuitBreaker?: ReturnType<typeof createCircuitBreakerFromEnv>;
+  /** Optional observability facade; defaults to an env-configured instance. */
+  observability?: ObservabilityService;
+  /** Optional anomaly detector; defaults to an env-configured instance. */
+  anomalyDetector?: AnomalyDetector;
 }
 
 /**
  * Builds the Express application.
  * Middleware order matters:
+ *   0. CORS headers (read-only allowance for the Phase-10 browser client;
+ *      placed first so every response — including errors and rate-limit
+ *      rejections — stays readable from the dev-server origin. OPTIONS
+ *      short-circuits before rate limiting so preflights never burn tokens)
  *   1. request id resolution (reuse X-Request-ID or generate — everything
  *      downstream, including the logger, depends on it)
  *   2. body parsing
@@ -38,6 +52,20 @@ export function createApp(dependencies: AppDependencies): Express {
   const app = express();
 
   app.disable('x-powered-by');
+
+  // Minimal CORS for the browser client (frontend dev server on :5173 calls
+  // this API directly). Read-only: GET/OPTIONS, no credentials, no cookies.
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Accept');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+
   app.use(requestIdMiddleware);
   app.use(express.json({ limit: '16kb' }));
   app.use(requestLogger);
@@ -52,6 +80,8 @@ export function createApp(dependencies: AppDependencies): Express {
   app.use(createApiRouter({
     healthMonitor: dependencies.healthMonitor,
     circuitBreaker: dependencies.circuitBreaker ?? createCircuitBreakerFromEnv(),
+    observability: dependencies.observability ?? createObservabilityServiceFromEnv(),
+    anomalyDetector: dependencies.anomalyDetector ?? createAnomalyDetectorFromEnv(),
   }));
 
   app.use(notFoundHandler);

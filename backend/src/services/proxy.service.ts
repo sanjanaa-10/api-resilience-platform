@@ -1,6 +1,7 @@
 import type {
   ProxyBusinessResult,
   ProxyOutcome,
+  RetryAttemptRecord,
   RetryPolicyConfig,
   ServiceRegistration,
 } from '../types';
@@ -20,6 +21,12 @@ export interface ProxyRequestOptions {
   retryPolicy: RetryPolicyConfig;
   /** Wall-clock ceiling for the whole loop (attempts + backoff combined). */
   retryTotalBudgetMs?: number;
+  /**
+   * Real-time per-attempt hook (fires the moment an attempt finishes, not
+   * after the loop). Used by observability for RETRY_ATTEMPT / UPSTREAM_TIMEOUT
+   * events. Failures are swallowed: proxying must never break on telemetry.
+   */
+  onAttemptRecord?: (record: RetryAttemptRecord) => void;
 }
 
 function extractUpstreamRequestId(body: unknown): string | null {
@@ -148,6 +155,14 @@ export async function proxyBusinessRequest(
         retryReason: record.retryReason,
         delayMs: record.delayMs,
       });
+
+      if (options.onAttemptRecord !== undefined) {
+        try {
+          options.onAttemptRecord(record);
+        } catch (error) {
+          logger.warn('proxy_observer_error', { errorMessage: (error as Error).message });
+        }
+      }
     },
   });
 

@@ -33,6 +33,28 @@ export interface Env {
   circuitOpenDurationMs: number;
   /** Concurrent probe requests allowed while HALF_OPEN. */
   circuitHalfOpenMaxRequests: number;
+  /** Max resilience events retained in memory (newest kept). */
+  eventsCapacity: number;
+  /** Latency samples kept per service for avg/p95 computation. */
+  metricsLatencyWindow: number;
+  /** Warning-signal count within the lookback window that opens an incident. */
+  incidentFailureThreshold: number;
+  /** Rolling window for counting warning signals (ms). */
+  incidentLookbackMs: number;
+  /** Failure-free period required before an incident resolves (ms). */
+  incidentRecoveryQuietMs: number;
+  /** Resolved incidents retained in memory. */
+  incidentMaxResolved: number;
+  /** Anomaly detector: baseline window size per service+metric. */
+  anomalyWindowSize: number;
+  /** Anomaly detector: samples required before scoring (cold start). */
+  anomalyMinSamples: number;
+  /** How often metrics are sampled into feature snapshots (ms). */
+  anomalySampleIntervalMs: number;
+  /** Score at or above which status becomes WARNING (0..1). */
+  anomalyScoreWarning: number;
+  /** Score at or above which status becomes ANOMALOUS (0..1). */
+  anomalyScoreAnomalous: number;
 }
 
 /** Exact payload contract for GET /health. */

@@ -4,10 +4,12 @@ import { env } from '../config/env';
 import { createGroupProxyHandler } from '../controllers/gateway.controller';
 import type { CircuitBreaker } from '../services/circuitBreaker.service';
 import type { HealthMonitor } from '../services/healthMonitor.service';
+import type { ObservabilityService } from '../observability/observability.service';
 
 export interface ProxyRoutesDependencies {
   circuitBreaker: CircuitBreaker;
   healthMonitor: HealthMonitor;
+  observability: ObservabilityService;
 }
 
 /**
@@ -33,6 +35,7 @@ export function createProxyRoutes(dependencies: ProxyRoutesDependencies): Router
         retryTotalBudgetMs: env.retryTotalBudgetMs,
         circuitBreaker: dependencies.circuitBreaker,
         healthMonitor: dependencies.healthMonitor,
+        observability: dependencies.observability,
       }),
     );
   }

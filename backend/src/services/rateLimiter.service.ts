@@ -14,6 +14,22 @@ interface BucketState {
   lastRefillAt: number; // unix timestamp in seconds (deterministic calc)
 }
 
+/** Payload delivered to the observability hook when a client is throttled. */
+export interface RateLimitRejectionInfo {
+  requestId: string | undefined;
+  clientId: string;
+  path: string;
+  retryAfterSeconds: number;
+  limit: number;
+}
+
+/**
+ * Optional constructor hook so the composition root can mirror rejections
+ * into the resilience event stream. Hook failures are swallowed: rate
+ * limiting must never break because observability does.
+ */
+export type RateLimitRejectionListener = (info: RateLimitRejectionInfo) => void;
+
 /**
  * Core token bucket rate limiter.
  *
@@ -29,6 +45,7 @@ export class TokenBucketRateLimiter {
   private readonly capacity: number;
   private readonly refillRate: number; // tokens per second
   private readonly cleanupIntervalMs: number;
+  private readonly onRejected?: RateLimitRejectionListener;
   private buckets: Map<string, BucketState> = new Map();
   private cleanupTimer: NodeJS.Timeout | null = null;
 
@@ -36,15 +53,18 @@ export class TokenBucketRateLimiter {
    * @param capacity       maximum tokens the bucket can hold
    * @param refillRate     tokens added per second
    * @param cleanupIntervalMs how often to purge inactive buckets (ms)
+   * @param onRejected     optional observability hook (rejections only)
    */
   constructor(
     capacity: number,
     refillRate: number,
     cleanupIntervalMs = 60_000,
+    onRejected?: RateLimitRejectionListener,
   ) {
     this.capacity = capacity;
     this.refillRate = refillRate;
     this.cleanupIntervalMs = cleanupIntervalMs;
+    this.onRejected = onRejected;
 
     // Kick off periodic cleanup so inactive buckets don't grow forever.
     // This runs once at startup and then every cleanupIntervalMs.
@@ -161,6 +181,20 @@ export class TokenBucketRateLimiter {
         retryAfterSeconds: retryAfter,
       });
 
+      if (this.onRejected !== undefined) {
+        try {
+          this.onRejected({
+            requestId: req.requestId,
+            clientId,
+            path: req.path,
+            retryAfterSeconds: retryAfter,
+            limit: this.capacity,
+          });
+        } catch (error) {
+          console.error(`[rateLimiter] rejection observer failed: ${(error as Error).message}`);
+        }
+      }
+
       res.status(429);
       res.setHeader('RateLimit-Limit', String(this.capacity));
       res.setHeader('RateLimit-Remaining', '0');
@@ -207,7 +241,9 @@ export class TokenBucketRateLimiter {
  *   RATE_LIMIT_REFILL_RATE = 10   (tokens per second)
  *   RATE_LIMIT_CLEANUP_INTERVAL_MS = 60000 (how often to purge inactive buckets, ms)
  */
-export function createTokenBucketRateLimiter(): TokenBucketRateLimiter {
+export function createTokenBucketRateLimiter(
+  options: { onRejected?: RateLimitRejectionListener } = {},
+): TokenBucketRateLimiter {
   const capacity = Number(process.env.RATE_LIMIT_CAPACITY ?? 20);
   const refillRate = Number(process.env.RATE_LIMIT_REFILL_RATE ?? 10);
   const cleanupIntervalMs = Number(
@@ -230,5 +266,10 @@ export function createTokenBucketRateLimiter(): TokenBucketRateLimiter {
     );
   }
 
-  return new TokenBucketRateLimiter(capacity, refillRate, cleanupIntervalMs);
+  return new TokenBucketRateLimiter(
+    capacity,
+    refillRate,
+    cleanupIntervalMs,
+    options.onRejected,
+  );
 }

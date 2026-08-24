@@ -17,12 +17,32 @@ import { logger } from '../utils/logger';
 /** Failover budget per logical request: primary + at most ONE fallback. */
 export const DEFAULT_MAX_FAILOVERS = 1;
 
+/** Payload mirrored into the resilience event stream by the orchestrator. */
+export interface FailoverEmission {
+  eventType: 'FAILOVER_STARTED' | 'FAILOVER_COMPLETED';
+  group: string;
+  primaryProvider: ServiceName;
+  requestId: string;
+  /** STARTED only — why traffic left the primary. */
+  reason?: FailoverReason | null;
+  /** COMPLETED only — the provider that ultimately served. */
+  selectedProvider?: ServiceName | null;
+}
+
+/**
+ * Optional observability hook. Failures inside it must never affect
+ * orchestration; the composition root wraps its own try/catch as well.
+ */
+export type FailoverEventEmitter = (emission: FailoverEmission) => void;
+
 export interface FailoverDeps {
   circuitBreaker: CircuitBreaker;
   /** Strict health gate for fallback selection (monitor-backed). */
   isProviderHealthy(name: ServiceName): boolean;
   /** Overridable for tests; production keeps the default budget of 1. */
   maxFailovers?: number;
+  /** Optional event-stream hook for FAILOVER_STARTED / COMPLETED. */
+  emit?: FailoverEventEmitter;
 }
 
 export interface FailoverRequestContext {
@@ -133,6 +153,23 @@ export async function executeWithFailover(
   let primaryDurationMs: number | null = null;
   let fallbackDurationMs: number | null = null;
   let failoversUsed = 0;
+  let startedEmitted = false;
+
+  const emitStarted = (reason: FailoverReason): void => {
+    if (startedEmitted || deps.emit === undefined) return;
+    startedEmitted = true;
+    try {
+      deps.emit({
+        eventType: 'FAILOVER_STARTED',
+        group: group.id,
+        primaryProvider: primary.name,
+        requestId: request.requestId,
+        reason,
+      });
+    } catch (error) {
+      logger.warn('failover_observer_error', { errorMessage: (error as Error).message });
+    }
+  };
 
   for (const [index, entry] of group.providers.entries()) {
     const isPrimary = index === 0;
@@ -163,6 +200,7 @@ export async function executeWithFailover(
       if (isPrimary) {
         failoverReason = 'CIRCUIT_OPEN';
         failoversUsed += 1; // leaving the primary consumes the budget too
+        emitStarted('CIRCUIT_OPEN');
         continue;
       }
       break;
@@ -210,12 +248,28 @@ export async function executeWithFailover(
     if (failoverReason === null) {
       failoverReason = failoverReasonFromOutcome(result.outcome);
     }
+    if (isPrimary && failoverReason !== null) emitStarted(failoverReason);
     failoversUsed += 1;
   }
 
   const totalDurationMs = Date.now() - startedAt;
   const failoverOccurred =
     selectedProvider !== null && selectedProvider !== primary.name;
+
+  if (failoverOccurred && deps.emit !== undefined) {
+    try {
+      deps.emit({
+        eventType: 'FAILOVER_COMPLETED',
+        group: group.id,
+        primaryProvider: primary.name,
+        requestId: request.requestId,
+        reason: failoverReason,
+        selectedProvider,
+      });
+    } catch (error) {
+      logger.warn('failover_observer_error', { errorMessage: (error as Error).message });
+    }
+  }
 
   const primaryAttempts = attempts.filter((a) => a.provider === primary.name && a.attempted).length;
   const fallbackAttempts = attempts.filter((a) => a.provider !== primary.name && a.attempted).length;

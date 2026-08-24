@@ -63,7 +63,7 @@ function parseOptionalBaseUrl(raw: string | undefined, label: string): string | 
  */
 export function loadEnv(): Env {
   try {
-    return {
+    const config: Env = {
       nodeEnv: parseNodeEnv(process.env.NODE_ENV),
       port: parsePort(process.env.PORT),
       serviceName: process.env.SERVICE_NAME?.trim() || 'api-resilience-platform',
@@ -158,7 +158,93 @@ export function loadEnv(): Env {
         10,
         'CIRCUIT_BREAKER_HALF_OPEN_MAX_REQUESTS',
       ),
+      eventsCapacity: parseIntInRange(
+        process.env.EVENTS_CAPACITY,
+        2_000,
+        10,
+        100_000,
+        'EVENTS_CAPACITY',
+      ),
+      metricsLatencyWindow: parseIntInRange(
+        process.env.METRICS_LATENCY_WINDOW,
+        200,
+        10,
+        100_000,
+        'METRICS_LATENCY_WINDOW',
+      ),
+      incidentFailureThreshold: parseIntInRange(
+        process.env.INCIDENT_FAILURE_THRESHOLD,
+        3,
+        1,
+        100,
+        'INCIDENT_FAILURE_THRESHOLD',
+      ),
+      incidentLookbackMs: parseIntInRange(
+        process.env.INCIDENT_LOOKBACK_MS,
+        60_000,
+        1_000,
+        3_600_000,
+        'INCIDENT_LOOKBACK_MS',
+      ),
+      incidentRecoveryQuietMs: parseIntInRange(
+        process.env.INCIDENT_RECOVERY_QUIET_MS,
+        10_000,
+        0,
+        3_600_000,
+        'INCIDENT_RECOVERY_QUIET_MS',
+      ),
+      incidentMaxResolved: parseIntInRange(
+        process.env.INCIDENT_MAX_RESOLVED,
+        100,
+        1,
+        10_000,
+        'INCIDENT_MAX_RESOLVED',
+      ),
+      anomalyWindowSize: parseIntInRange(
+        process.env.ANOMALY_WINDOW_SIZE,
+        30,
+        5,
+        500,
+        'ANOMALY_WINDOW_SIZE',
+      ),
+      anomalyMinSamples: parseIntInRange(
+        process.env.ANOMALY_MIN_SAMPLES,
+        10,
+        2,
+        100,
+        'ANOMALY_MIN_SAMPLES',
+      ),
+      anomalySampleIntervalMs: parseIntInRange(
+        process.env.ANOMALY_SAMPLE_INTERVAL_MS,
+        5_000,
+        200,
+        600_000,
+        'ANOMALY_SAMPLE_INTERVAL_MS',
+      ),
+      anomalyScoreWarning: parseFloat(
+        process.env.ANOMALY_SCORE_WARNING || '0.5',
+      ),
+      anomalyScoreAnomalous: parseFloat(
+        process.env.ANOMALY_SCORE_ANOMALOUS || '0.8',
+      ),
     };
+    if (
+      !(
+        config.anomalyScoreWarning > 0 &&
+        config.anomalyScoreWarning < config.anomalyScoreAnomalous &&
+        config.anomalyScoreAnomalous <= 1
+      )
+    ) {
+      throw new Error(
+        'Invalid ANOMALY_SCORE_* thresholds — require 0 < WARNING < ANOMALOUS <= 1.',
+      );
+    }
+    if (config.anomalyMinSamples > config.anomalyWindowSize) {
+      throw new Error(
+        'Invalid ANOMALY_MIN_SAMPLES — must not exceed ANOMALY_WINDOW_SIZE.',
+      );
+    }
+    return config;
   } catch (error) {
     console.error(`[config] Environment validation failed: ${(error as Error).message}`);
     process.exit(1);

@@ -7,6 +7,12 @@ export interface HealthMonitorOptions {
   intervalMs: number;
   /** Per-probe deadline in milliseconds. */
   timeoutMs: number;
+  /**
+   * Observability hook, fired whenever a probe produces a status CHANGE
+   * (including the first unknown -> healthy/unhealthy determination).
+   * Hook failures are swallowed: monitoring must never break probing.
+   */
+  onStateChange?: (next: ServiceHealthState, previous: ServiceHealthState | null) => void;
 }
 
 /**
@@ -158,6 +164,20 @@ export class HealthMonitor {
 
     this.states.set(entry.name, updated);
 
+    // Observability hook: fire on ANY status change, including the first
+    // determination out of 'unknown'. Failures are contained here.
+    if (
+      this.options.onStateChange !== undefined &&
+      previous !== undefined &&
+      previous.status !== nextStatus
+    ) {
+      try {
+        this.options.onStateChange(updated, previous);
+      } catch (error) {
+        logger.warn('health_observer_error', { errorMessage: (error as Error).message });
+      }
+    }
+
     if (previous && previous.status !== 'unknown' && previous.status !== nextStatus) {
       logger.info('service_status_changed', {
         service: entry.name,
@@ -166,8 +186,7 @@ export class HealthMonitor {
         latencyMs: updated.latencyMs,
         error: updated.lastError,
       });
-    } else if (!healthy) {
-      logger.debug('health_check_failed', {
+    } else if (!healthy) {      logger.debug('health_check_failed', {
         service: entry.name,
         consecutiveFailures: updated.consecutiveFailures,
         error: updated.lastError,

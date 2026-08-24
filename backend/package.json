@@ -11,7 +11,7 @@
     "dev": "node --import tsx --watch src/server.ts",
     "build": "node node_modules/typescript/lib/tsc.js",
     "start": "node dist/server.js",
-    "test": "node --import tsx --test scripts/circuitBreaker.test.ts scripts/rateLimiter.test.ts scripts/failover.test.ts",
+    "test": "node --import tsx --test scripts/circuitBreaker.test.ts scripts/rateLimiter.test.ts scripts/failover.test.ts scripts/observability.test.ts scripts/anomaly.test.ts",
     "lint": "node node_modules/eslint/bin/eslint.js \"src/**/*.ts\"",
     "format": "node node_modules/prettier/bin/prettier.cjs --write \"src/**/*.ts\"",
     "format:check": "node node_modules/prettier/bin/prettier.cjs --check \"src/**/*.ts\""

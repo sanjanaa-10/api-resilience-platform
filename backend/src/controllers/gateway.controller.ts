@@ -15,8 +15,10 @@ import type { ProxyOutcome } from '../services/proxy.service';
 import {
   buildFailoverMetadata,
   executeWithFailover,
+  type ProviderExecutor,
 } from '../services/failover.service';
 import type { CircuitBreaker } from '../services/circuitBreaker.service';
+import type { ObservabilityService } from '../observability/observability.service';
 
 function buildGatewayError(
   code: GatewayErrorCode,
@@ -111,11 +113,60 @@ export function createGroupProxyHandler(
     retryTotalBudgetMs?: number;
     circuitBreaker: CircuitBreaker;
     healthMonitor: HealthMonitor;
+    /** Optional observability sink; when absent the handler behaves as before. */
+    observability?: ObservabilityService;
   },
 ): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const requestId = req.requestId;
+    const primary = group.providers[0]?.name ?? ('unknown' as ServiceName);
+    const { observability } = options;
+
+    observability?.record({
+      eventType: 'REQUEST_STARTED',
+      service: primary,
+      requestId,
+      message: `Request started for group ${group.id}`,
+      metadata: {
+        group: group.id,
+        method: req.method,
+        path: `${group.gatewayPath}/test`,
+      },
+    });
+
     try {
+      // Per-provider executor enriched with real-time attempt observations
+      // (RETRY_ATTEMPT / UPSTREAM_TIMEOUT) for the event stream.
+      const executor: ProviderExecutor = async (entry, execOptions) =>
+        proxyBusinessRequest(entry, {
+          ...execOptions,
+          onAttemptRecord: (record) => {
+            if (record.retried) {
+              observability?.record({
+                eventType: 'RETRY_ATTEMPT',
+                service: entry.name,
+                requestId,
+                message: `Attempt ${record.attempt} failed (${record.outcome}); retry scheduled`,
+                metadata: {
+                  attempt: record.attempt,
+                  outcome: record.outcome,
+                  status: record.status,
+                  delayMs: record.delayMs ?? null,
+                },
+              });
+            }
+            if (record.outcome === 'TIMEOUT') {
+              observability?.record({
+                eventType: 'UPSTREAM_TIMEOUT',
+                service: entry.name,
+                requestId,
+                message: `Upstream ${entry.name} timed out after ${execOptions.timeoutMs}ms`,
+                metadata: { attempt: record.attempt, timeoutMs: execOptions.timeoutMs },
+              });
+            }
+          },
+        });
+
       const execution = await executeWithFailover(
         group,
         {
@@ -124,10 +175,30 @@ export function createGroupProxyHandler(
           retryPolicy: options.retryPolicy,
           retryTotalBudgetMs: options.retryTotalBudgetMs,
         },
-        proxyBusinessRequest,
+        executor,
         {
           circuitBreaker: options.circuitBreaker,
           isProviderHealthy: (name) => options.healthMonitor.isHealthy(name),
+          ...(observability !== undefined
+            ? {
+                emit: (emission) => {
+                  observability.record({
+                    eventType: emission.eventType,
+                    service: primary,
+                    requestId,
+                    message:
+                      emission.eventType === 'FAILOVER_STARTED'
+                        ? `Failover started from ${primary} (${emission.reason})`
+                        : `Failover completed: served by ${emission.selectedProvider}`,
+                    metadata: {
+                      group: emission.group,
+                      reason: emission.reason ?? null,
+                      selectedProvider: emission.selectedProvider ?? null,
+                    },
+                  });
+                },
+              }
+            : {}),
         },
       );
 
@@ -147,7 +218,6 @@ export function createGroupProxyHandler(
       // client is the primary's open circuit — same envelope as a plain
       // fail-fast, enriched with the per-provider skip trace.
       if (execution.outcome === null || execution.selectedProvider === null) {
-        const primary = group.providers[0]?.name ?? ('unknown' as ServiceName);
         logger.warn('circuit_fast_fail', {
           requestId,
           group: group.id,
@@ -155,6 +225,18 @@ export function createGroupProxyHandler(
           path: `${group.gatewayPath}/test`,
           reason: 'NO_ELIGIBLE_PROVIDER',
           attempts: execution.attempts,
+        });
+        observability?.record({
+          eventType: 'REQUEST_FAILED',
+          service: primary,
+          requestId,
+          message: `No eligible provider could be attempted for group ${group.id}`,
+          metadata: {
+            group: group.id,
+            status: 503,
+            durationMs: execution.totalDurationMs,
+            reason: 'NO_ELIGIBLE_PROVIDER',
+          },
         });
         res.status(503).json(
           buildGatewayError(
@@ -171,6 +253,35 @@ export function createGroupProxyHandler(
 
       const outcome: ProxyOutcome = execution.outcome;
       const servingProvider = execution.selectedProvider;
+
+      // Single terminal lifecycle event per logical request. The SERVING
+      // provider owns it (metrics are per-provider); the primary is captured
+      // in metadata via failoverOccurred for correlation.
+      observability?.record({
+        eventType: outcome.kind === 'success' ? 'REQUEST_COMPLETED' : 'REQUEST_FAILED',
+        service: servingProvider,
+        requestId,
+        message:
+          outcome.kind === 'success'
+            ? `Request served by ${servingProvider} with HTTP ${outcome.status}`
+            : `Request failed at ${servingProvider} (${outcome.kind})`,
+        metadata: {
+          group: group.id,
+          outcomeKind: outcome.kind,
+          status:
+            outcome.kind === 'success' || outcome.kind === 'upstream-error'
+              ? outcome.status
+              : outcome.kind === 'timeout'
+                ? 504
+                : outcome.kind === 'unreachable'
+                  ? 503
+                  : 502,
+          durationMs: execution.totalDurationMs,
+          attempts: execution.retry?.attempts ?? 0,
+          retries: execution.retry?.retries ?? 0,
+          failoverOccurred: execution.failoverOccurred,
+        },
+      });
 
       switch (outcome.kind) {
         case 'success': {

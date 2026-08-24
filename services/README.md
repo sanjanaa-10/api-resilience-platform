@@ -185,3 +185,19 @@ Phase 3+ gateway will health-probe these services, route traffic to their
 business endpoints, trip circuit breakers when `failureRate` climbs, time out
 against `latencyMs`, fail over between providers, and stream their structured
 logs into the metrics/anomaly pipeline.
+
+**Phase 8 status:** the gateway now observes all of this live — every proxied
+call, retry, timeout, rate-limit rejection, circuit transition and failover
+becomes a typed resilience event (see `backend/src/observability/`), feeding
+`/api/metrics`, `/api/events` and deterministic incident timelines under
+`/api/incidents`. The `/simulation/*` controls are exactly the chaos knobs
+the Step 8 E2E suite (`backend/scripts/e2e-observability.cjs`) drives while
+asserting the incident story: buildup → CRITICAL incident with chronological
+timeline → resolution after recovery.
+
+**Phase 9 status:** the same controls now feed anomaly detection —
+`backend/scripts/e2e-anomaly.cjs` sets `{ "latencyMs": 2500 }` on this
+service (deliberately below the gateway's 3s timeout, so traffic keeps
+succeeding) and watches the gateway's rolling baselines flag payment as
+WARNING→ANOMALOUS with ranked explanations, then verifies full recovery to
+NORMAL (plus an `ANOMALY_RESOLVED` event) after `/simulation/reset`.

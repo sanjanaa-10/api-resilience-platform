@@ -1,0 +1,149 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ─── Design tokens ───────────────────────────────────────────────────────────
+   Pastel + editorial + calm infrastructure control center.
+   Warm off-white light mode, deep warm charcoal dark mode, pastel accents. */
+
+:root {
+  --bg: #f6f4ef;
+  --surface: #fdfcf9;
+  --surface-2: #efece4;
+  --ink: #292620;
+  --ink-soft: #75705f;
+  --ink-faint: #a49e8e;
+  --line: #e3ded2;
+  --line-strong: #d3ccbb;
+
+  --lavender: #a996dd;
+  --lavender-wash: #ede8f8;
+  --blue: #86aed6;
+  --blue-wash: #e3edf7;
+  --peach: #eeb08c;
+  --peach-wash: #fbeade;
+  --mint: #8fc7ae;
+  --mint-wash: #e2f2ea;
+  --rose: #e39a9a;
+  --rose-wash: #f9e6e6;
+  --gold: #dcb56e;
+
+  --ok: #5fa98a;
+  --warn: #d18a4e;
+  --crit: #c96a6a;
+
+  --shadow-soft: 0 1px 2px rgb(41 38 32 / 0.04), 0 4px 16px rgb(41 38 32 / 0.05);
+  --shadow-lift: 0 2px 4px rgb(41 38 32 / 0.05), 0 10px 28px rgb(41 38 32 / 0.07);
+}
+
+.dark {
+  --bg: #1b1917;
+  --surface: #242220;
+  --surface-2: #2c2926;
+  --ink: #ece8df;
+  --ink-soft: #a49e90;
+  --ink-faint: #736e62;
+  --line: #37342f;
+  --line-strong: #47433c;
+
+  --lavender: #b3a1e2;
+  --lavender-wash: #322c44;
+  --blue: #92b4da;
+  --blue-wash: #26303e;
+  --peach: #ecb394;
+  --peach-wash: #40312a;
+  --mint: #93cbaf;
+  --mint-wash: #24382f;
+  --rose: #e2a09e;
+  --rose-wash: #41302e;
+  --gold: #ddb96f;
+
+  --ok: #74b894;
+  --warn: #dc9a5e;
+  --crit: #d98280;
+
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.25), 0 4px 16px rgb(0 0 0 / 0.2);
+  --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.3), 0 10px 28px rgb(0 0 0 / 0.28);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-soft: var(--ink-soft);
+  --color-faint: var(--ink-faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-lavender: var(--lavender);
+  --color-lavender-wash: var(--lavender-wash);
+  --color-blue: var(--blue);
+  --color-blue-wash: var(--blue-wash);
+  --color-peach: var(--peach);
+  --color-peach-wash: var(--peach-wash);
+  --color-mint: var(--mint);
+  --color-mint-wash: var(--mint-wash);
+  --color-rose: var(--rose);
+  --color-rose-wash: var(--rose-wash);
+  --color-gold: var(--gold);
+
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-crit: var(--crit);
+
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --shadow-soft: var(--shadow-soft);
+  --shadow-lift: var(--shadow-lift);
+
+  --animate-flow: flow 1.4s linear infinite;
+  --animate-breathe: breathe 3.2s ease-in-out infinite;
+
+  @keyframes flow {
+    to {
+      stroke-dashoffset: -14;
+    }
+  }
+
+  @keyframes breathe {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 240ms ease, color 240ms ease;
+}
+
+:focus-visible {
+  outline: 2px solid var(--lavender);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
