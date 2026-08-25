@@ -1,19 +1,24 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
+import type { ProcessEnv } from 'node:process';
 
 const REPO_ROOT = process.cwd();
 const IS_WINDOWS = process.platform === 'win32';
 
 const CHILDREN: ChildProcess[] = [];
 
-function createChildEnv(serviceType: 'backend' | 'simulator'): Record<string, string> {
-  const base = { ...process.env };
+function createChildEnv(serviceType: 'backend' | 'simulator', name?: string, port?: number): ProcessEnv {
+  const base: ProcessEnv = { ...process.env };
   const nodePath = IS_WINDOWS
     ? join(REPO_ROOT, serviceType === 'backend' ? 'backend' : 'services', 'node_modules')
     : join(REPO_ROOT, serviceType === 'backend' ? 'backend' : 'services', 'node_modules');
   if (nodePath) {
     base.NODE_PATH = nodePath;
+  }
+  if (serviceType === 'simulator') {
+    if (name !== undefined) base.SERVICE_NAME = name;
+    if (port !== undefined) base.PORT = String(port);
   }
   return base;
 }
@@ -30,7 +35,7 @@ function startBackend(): ChildProcess {
 function startService(name: string, script: string, port: number): ChildProcess {
   const proc = spawn('node', [script], {
     stdio: 'inherit',
-    env: createChildEnv('simulator'),
+    env: createChildEnv('simulator', name, port),
   });
   CHILDREN.push(proc);
   return proc;
