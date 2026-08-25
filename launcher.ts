@@ -1,15 +1,14 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import type { ProcessEnv } from 'node:process';
 
 const REPO_ROOT = process.cwd();
 const IS_WINDOWS = process.platform === 'win32';
 
 const CHILDREN: ChildProcess[] = [];
 
-function createChildEnv(serviceType: 'backend' | 'simulator', name?: string, port?: number): ProcessEnv {
-  const base: ProcessEnv = { ...process.env };
+function createChildEnv(serviceType: 'backend' | 'simulator', name?: string, port?: number): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = { ...process.env };
   const nodePath = IS_WINDOWS
     ? join(REPO_ROOT, serviceType === 'backend' ? 'backend' : 'services', 'node_modules')
     : join(REPO_ROOT, serviceType === 'backend' ? 'backend' : 'services', 'node_modules');
