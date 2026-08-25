@@ -1,26 +1,42 @@
-import { spawn } from 'child_process';
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 
-const CHILDREN: NodeJS.Process[] = [];
+const REPO_ROOT = process.cwd();
+const IS_WINDOWS = process.platform === 'win32';
 
-function startBackend(): NodeJS.Process {
+const CHILDREN: ChildProcess[] = [];
+
+function createChildEnv(serviceType: 'backend' | 'simulator'): Record<string, string> {
+  const base = { ...process.env };
+  const nodePath = IS_WINDOWS
+    ? join(REPO_ROOT, serviceType === 'backend' ? 'backend' : 'services', 'node_modules')
+    : join(REPO_ROOT, serviceType === 'backend' ? 'backend' : 'services', 'node_modules');
+  if (nodePath) {
+    base.NODE_PATH = nodePath;
+  }
+  return base;
+}
+
+function startBackend(): ChildProcess {
   const proc = spawn('node', ['dist/backend/src/server.js'], {
     stdio: 'inherit',
-    env: { ...process.env, PORT: process.env.PORT || '4000' },
+    env: createChildEnv('backend'),
   });
   CHILDREN.push(proc);
   return proc;
 }
 
-function startService(name: string, script: string, port: number): NodeJS.Process {
+function startService(name: string, script: string, port: number): ChildProcess {
   const proc = spawn('node', [script], {
     stdio: 'inherit',
-    env: { ...process.env, SERVICE_NAME: name, PORT: String(port) },
+    env: createChildEnv('simulator'),
   });
   CHILDREN.push(proc);
   return proc;
 }
 
-function handleShutdown(signal: string): void {
+function handleShutdown(signal: NodeJS.Signals): void {
   console.log(`Received ${signal}, shutting down all processes...`);
   CHILDREN.forEach((child) => {
     child.kill(signal);
