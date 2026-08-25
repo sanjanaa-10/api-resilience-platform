@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "sourceMap": false,
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": [
+    "launcher.ts",
+    "backend/src/**/*.ts",
+    "services/ai-service/src/**/*.ts",
+    "services/payment-service/src/**/*.ts",
+    "services/notification-service/src/**/*.ts",
+    "services/ai-fallback-service/src/**/*.ts",
+    "services/shared/src/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
